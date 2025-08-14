@@ -7,64 +7,119 @@ on:
         description: 'Enable GPL codecs (x264/x265, etc.)'
         required: false
         default: 'false'
+      api_level:
+        description: 'Android API level for LTS (16–21). 19 is the most reliable.'
+        required: false
+        default: '19'
+      ndk_version:
+        description: 'NDK version. Use 23.2.8568313 (r23c) or 22.1.7171670 (r22b).'
+        required: false
+        default: '23.2.8568313'
+      extra_flags:
+        description: 'Extra android.sh flags (optional), e.g. --architectures=arm64-v8a,x86_64'
+        required: false
+        default: ''
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-
     steps:
-      # 0) Use Java 17 BEFORE touching the Android SDK
+      # Java BEFORE touching Android tools
       - name: Set up Java 17 (Temurin)
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
       - name: Check Java
         run: |
+          set -euxo pipefail
           java -version
-          echo "JAVA_HOME=$JAVA_HOME"
+          echo "JAVA_HOME=${JAVA_HOME}"
 
-      # 1) Install Android SDK / cmdline-tools and accept licenses
+      # Android SDK / licenses
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
           accept-android-sdk-licenses: true
 
-      # 2) Install platform + NDK r23c (LTS-friendly)
-      - name: Install NDK r23c and platforms
+      # Install NDK + platform; export envs for subsequent steps
+      - name: Install NDK and platforms
         run: |
-          sdkmanager --install "platform-tools" "platforms;android-29" "ndk;23.2.8568313"
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/23.2.8568313" >> $GITHUB_ENV
+          set -euxo pipefail
+          sdkmanager --install "platform-tools" "platforms;android-29" "ndk;${{ github.event.inputs.ndk_version }}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/${{ github.event.inputs.ndk_version }}" >> "$GITHUB_ENV"
 
-      # 3) Fetch ffmpeg-kit
+      # Build prerequisites (incl. gettext for libiconv autoreconf)
+      - name: Install build prerequisites
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake libtool pkg-config curl git nasm doxygen \
+            make cmake unzip zip build-essential gettext
+
+      # Pull ffmpeg-kit repo
       - name: Checkout ffmpeg-kit
         uses: actions/checkout@v4
         with:
           repository: arthenica/ffmpeg-kit
           fetch-depth: 0
 
-      # 4) Build (Full + LTS; toggle GPL via input)
+      # Diagnostics (helps when something breaks)
+      - name: Environment diagnostics
+        run: |
+          set -euxo pipefail
+          uname -a
+          df -h
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
+          echo "ANDROID_NDK_ROOT=${ANDROID_NDK_ROOT}"
+          ls -la "${ANDROID_SDK_ROOT}/ndk" || true
+          "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --version || true
+          "${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version || true
+
+      # Build (Full + LTS, API from input, GPL toggle, reconf libiconv)
       - name: Build (Full + LTS)
         run: |
-          set -e
+          set -euxo pipefail
           chmod +x android.sh
+          FLAGS="--full --lts --api-level=${{ github.event.inputs.api_level }} --reconf-libiconv"
           if [ "${{ github.event.inputs.enable_gpl }}" = "true" ]; then
-            ./android.sh --full --enable-gpl --lts
-          else
-            ./android.sh --full --lts
+            FLAGS="${FLAGS} --enable-gpl"
+          fi
+          if [ -n "${{ github.event.inputs.extra_flags }}" ]; then
+            FLAGS="${FLAGS} ${{ github.event.inputs.extra_flags }}"
           fi
 
-      # 5) Publish artifacts
+          echo "Running: ./android.sh ${FLAGS}"
+          # Keep a CI-side log in addition to ffmpeg-kit/build.log
+          ./android.sh ${FLAGS} 2>&1 | tee build-ci.log
+
+      # Upload artifacts (AARs + logs)
       - name: Upload AARs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ffmpeg-kit-android-full-LTS
           path: prebuilt/bundle-android-aar-lts/*.aar
+          if-no-files-found: warn
 
-      - name: Upload build log
+      - name: Upload logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
-          path: build.log
+          name: build-logs
+          path: |
+            build.log
+            build-ci.log
+          if-no-files-found: warn
+
+      # Tail logs on failure for quick triage in the job view
+      - name: Tail build.log on failure
+        if: failure()
+        run: |
+          echo "---- tail build.log ----"
+          tail -n 400 build.log || true
+          echo "---- tail build-ci.log ----"
+          tail -n 400 build-ci.log || true
