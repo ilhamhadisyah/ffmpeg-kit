@@ -1,50 +1,39 @@
 name: Build FFmpegKit AAR
 
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - main
+    paths:
+      - 'app/**/*.gradle'
+      - 'cpp/**'
+      - '.github/workflows/build-aar.yml'
 
 jobs:
-  build-android-aar:
+  build-aar:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v3
 
-    - name: Set up Java
-      uses: actions/setup-java@v4
-      with:
-        distribution: 'temurin'
-        java-version: '17'
+      - name: Set up Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: 11
 
-    - name: Setup Android NDK
-      uses: nttld/setup-ndk@v1
-      id: setup-ndk
-      with:
-        ndk-version: r25b # Or your desired NDK version
+      - name: Set up Android SDK & NDK
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 29
+          ndk-version: '25.2.9519653'
+          cmake-version: '3.22.1'
+          components: tools, platform-tools
 
-    - name: Install build dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y autoconf automake libtool pkg-config curl cmake gperf texinfo yasm nasm bison autogen git wget autopoint meson ninja
+      - name: Build FFmpegKit full AAR
+        run: |
+          chmod +x android.sh
+          ./android.sh --lts --full
 
-    - name: Set Android environment variables
-      run: |
-        echo "ANDROID_SDK_ROOT=${{ steps.setup-ndk.outputs.android-sdk-root }}" >> $GITHUB_ENV
-        echo "ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
-
-    - name: Build FFmpegKit AAR
-      run: |
-        # Clone FFmpegKit if not already part of your repo, or navigate to its directory
-        # git clone https://github.com/arthenica/ffmpeg-kit.git
-        # cd ffmpeg-kit
-        ./android.sh # Add options like --enable-gpl, --enable-fontconfig as needed
-
-    - name: Upload AAR artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ffmpeg-kit-aar
-        path: prebuilt/*.aar
+      - name: Upload AAR Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ffmpeg-kit-full-aar
+          path: prebuilt/bundle-android-aar-lts/*.aar
